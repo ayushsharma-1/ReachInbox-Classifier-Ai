@@ -1,6 +1,31 @@
 # SmartInbox - AI-Powered Email Aggregator
 
-A real-time email management system with AI-powered categorization, Elasticsearch search, and Slack/Webhook integrations. Built with Node.js, MongoDB, and Elasticsearch.
+A real-time email management system with AI-powered categorization, Elasticsearch search, and Slack/Webhook integrations. Built ### **Authentication**
+```bash
+# Start OAuth flow
+GET /auth/gmail/initiate
+
+# OAuth callback (automatic)
+GET /oauth2callback?code=...
+```
+
+### **AI Draft Management**
+```bash
+# Get all drafts
+GET /api/drafts?accountId=ID&status=draft&limit=20
+
+# Get specific draft
+GET /api/drafts/:id
+
+# Update draft
+PUT /api/drafts/:id
+
+# Generate draft for specific email
+POST /api/emails/:emailId/generate-draft
+
+# Test AI draft generation
+POST /api/ai/test-draft
+```e.js, MongoDB, and Elasticsearch.
 
 ## 🚀 Features
 
@@ -25,6 +50,13 @@ A real-time email management system with AI-powered categorization, Elasticsearc
 - Slack notifications for "Interested" emails
 - Webhook triggers to webhook.site for external automation
 - Test endpoints for integration validation
+
+### ✅ **Step 5: AI-Powered Draft Generation**
+- **Gemini AI integration** for automatic email draft generation
+- **Smart draft creation** for "Interested" and important emails
+- **Contextual replies** based on user background
+- **Draft management system** with status tracking
+- **RESTful API** for draft operations (CRUD)
 
 ## 🛠️ Tech Stack
 
@@ -69,6 +101,9 @@ REDIRECT_URI=http://localhost:3000/oauth2callback
 
 # AI Categorization
 FLASK_MODEL_URI=https://email-classifier-yw26.onrender.com/predict
+
+# Gemini AI for Draft Generation
+GEMINI_API_KEY=your-gemini-api-key-here
 
 # Database Configuration
 MONGODB_URI=mongodb+srv://username:password@cluster.mongodb.net/emails?retryWrites=true&w=majority

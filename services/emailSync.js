@@ -1,9 +1,11 @@
 // services/emailSync.js
 const Email = require('../models/Email');
 const Account = require('../models/Account');
+const EmailDraft = require('../models/EmailDraft');
 const esClient = require('../elasticsearch/client');
 const { sendSlackNotification } = require('./slackNotification');
 const { triggerWebhook } = require('./webhookTrigger');
+const { generateEmailDraft } = require('./geminiAI');
 const axios = require('axios');
 const FLASK_MODEL_URI = process.env.FLASK_MODEL_URI;
 
@@ -95,6 +97,69 @@ async function storeEmail(parsed, accountEmail) {
         await triggerWebhook(emailData);
       } catch (webhookError) {
         console.error('Webhook trigger failed:', webhookError.message);
+      }
+
+      // 🤖 Generate AI Draft Reply for Interested emails
+      try {
+        console.log('🤖 Generating AI draft reply for interested email...');
+        const draftData = await generateEmailDraft(emailData);
+        
+        if (draftData) {
+          const emailDraft = new EmailDraft({
+            originalEmailId: parsed.messageId,
+            originalSubject: parsed.subject || '(no subject)',
+            originalFrom: parsed.from?.text || '',
+            draftSubject: draftData.draftReply.subject,
+            draftContent: draftData.draftReply.content,
+            aiModel: draftData.draftReply.aiModel,
+            account: account._id,
+            category: label,
+            generatedAt: draftData.draftReply.generatedAt
+          });
+
+          await emailDraft.save();
+          console.log('✅ AI draft saved to database');
+        }
+      } catch (aiError) {
+        console.error('❌ AI draft generation failed:', aiError.message);
+      }
+    }
+
+    // 🎯 Generate AI drafts for other important categories
+    const importantCategories = ['meeting booked', 'important'];
+    if (label && importantCategories.includes(label.toLowerCase())) {
+      try {
+        console.log(`🤖 Generating AI draft for ${label} email...`);
+        const emailData = {
+          messageId: parsed.messageId,
+          subject: parsed.subject || '(no subject)',
+          from: parsed.from?.text || '',
+          to: parsed.to?.text || '',
+          date: parsed.date || new Date(),
+          body: parsed.text || '',
+          label: label
+        };
+
+        const draftData = await generateEmailDraft(emailData);
+        
+        if (draftData) {
+          const emailDraft = new EmailDraft({
+            originalEmailId: parsed.messageId,
+            originalSubject: parsed.subject || '(no subject)',
+            originalFrom: parsed.from?.text || '',
+            draftSubject: draftData.draftReply.subject,
+            draftContent: draftData.draftReply.content,
+            aiModel: draftData.draftReply.aiModel,
+            account: account._id,
+            category: label,
+            generatedAt: draftData.draftReply.generatedAt
+          });
+
+          await emailDraft.save();
+          console.log(`✅ AI draft saved for ${label} email`);
+        }
+      } catch (aiError) {
+        console.error('❌ AI draft generation failed:', aiError.message);
       }
     }
 

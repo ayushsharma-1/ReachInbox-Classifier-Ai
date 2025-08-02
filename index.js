@@ -1,4 +1,3 @@
-// server.js
 const express = require('express');
 const mongoose = require('mongoose');
 const { getAuthUrl, getTokens } = require('./auth/gmail');
@@ -7,10 +6,12 @@ const { google } = require('googleapis');
 require('dotenv').config();
 const Account = require('./models/Account');
 const Email = require('./models/Email');
+const EmailDraft = require('./models/EmailDraft');
 const esClient = require('./elasticsearch/client');
 const { searchEmails } = require('./services/emailSync');
 const { sendSlackNotification } = require('./services/slackNotification');
 const { triggerWebhook } = require('./services/webhookTrigger');
+const { generateEmailDraft, generateContextualReply } = require('./services/geminiAI');
 
 const app = express();
 const PORT = 3000;
@@ -128,6 +129,157 @@ app.get('/api/emails/interested', async (req, res) => {
   }
 });
 
+// 🤖 AI Draft Management Endpoints
+
+// Get all drafts for a user
+app.get('/api/drafts', async (req, res) => {
+  try {
+    const { accountId, status, limit = 20, offset = 0 } = req.query;
+    
+    const filter = {};
+    if (accountId) filter.account = accountId;
+    if (status) filter.status = status;
+
+    const drafts = await EmailDraft.find(filter)
+      .populate('account', 'email')
+      .sort({ generatedAt: -1 })
+      .limit(parseInt(limit))
+      .skip(parseInt(offset));
+
+    const total = await EmailDraft.countDocuments(filter);
+
+    res.json({ 
+      success: true, 
+      drafts, 
+      total,
+      count: drafts.length 
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get specific draft by ID
+app.get('/api/drafts/:id', async (req, res) => {
+  try {
+    const draft = await EmailDraft.findById(req.params.id).populate('account', 'email');
+    if (!draft) {
+      return res.status(404).json({ success: false, error: 'Draft not found' });
+    }
+    res.json({ success: true, draft });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Update draft content
+app.put('/api/drafts/:id', async (req, res) => {
+  try {
+    const { draftContent, status } = req.body;
+    
+    const updateData = {};
+    if (draftContent) updateData.draftContent = draftContent;
+    if (status) updateData.status = status;
+
+    const draft = await EmailDraft.findByIdAndUpdate(
+      req.params.id, 
+      updateData, 
+      { new: true }
+    ).populate('account', 'email');
+
+    if (!draft) {
+      return res.status(404).json({ success: false, error: 'Draft not found' });
+    }
+
+    res.json({ success: true, draft });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Generate new draft for specific email
+app.post('/api/emails/:emailId/generate-draft', async (req, res) => {
+  try {
+    const { context } = req.body;
+    
+    const email = await Email.findById(req.params.emailId).populate('account');
+    if (!email) {
+      return res.status(404).json({ success: false, error: 'Email not found' });
+    }
+
+    const emailData = {
+      messageId: email.messageId,
+      subject: email.subject,
+      from: email.from,
+      to: email.to,
+      body: email.body,
+      label: email.label
+    };
+
+    const draftData = context 
+      ? await generateContextualReply(emailData, context)
+      : await generateEmailDraft(emailData);
+
+    if (!draftData) {
+      return res.status(500).json({ success: false, error: 'Failed to generate draft' });
+    }
+
+    const emailDraft = new EmailDraft({
+      originalEmailId: email.messageId,
+      originalSubject: email.subject,
+      originalFrom: email.from,
+      draftSubject: draftData.draftReply?.subject || draftData.contextualReply?.subject,
+      draftContent: draftData.draftReply?.content || draftData.contextualReply?.content,
+      aiModel: draftData.draftReply?.aiModel || draftData.contextualReply?.aiModel,
+      account: email.account._id,
+      category: email.label,
+      context: context || '',
+      generatedAt: new Date()
+    });
+
+    await emailDraft.save();
+
+    res.json({ 
+      success: true, 
+      message: 'Draft generated successfully',
+      draft: emailDraft 
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Test Gemini AI integration
+app.post('/api/ai/test-draft', async (req, res) => {
+  try {
+    const testEmail = {
+      messageId: 'test-' + Date.now(),
+      subject: req.body.subject || 'Test Meeting Request',
+      from: req.body.from || 'recruiter@example.com',
+      body: req.body.body || 'Hi, we would like to schedule an interview with you. When would be a good time?',
+      label: 'Interested'
+    };
+
+    const context = req.body.context || '';
+    const draftData = context 
+      ? await generateContextualReply(testEmail, context)
+      : await generateEmailDraft(testEmail);
+
+    if (!draftData) {
+      return res.status(500).json({ success: false, error: 'Failed to generate test draft' });
+    }
+
+    res.json({ 
+      success: true, 
+      message: 'Test draft generated successfully',
+      originalEmail: testEmail,
+      generatedDraft: draftData 
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 
 app.get('/oauth2callback', async (req, res) => {
   const code = req.query.code;
@@ -159,41 +311,48 @@ app.get('/oauth2callback', async (req, res) => {
 
 // Ensure Elasticsearch index exists
 async function ensureElasticsearchIndex() {
-  const index = 'emails';
+  try {
+    const index = 'emails';
 
-  const exists = await esClient.indices.exists({ index });
-  if (!exists) {
-    console.log(`Creating missing Elasticsearch index: ${index}`);
-    await esClient.indices.create({
-      index,
-      settings: {
-        analysis: {
-          analyzer: {
-            default: {
-              type: 'standard'
+    const exists = await esClient.indices.exists({ index });
+    if (!exists) {
+      console.log(`Creating missing Elasticsearch index: ${index}`);
+      await esClient.indices.create({
+        index,
+        settings: {
+          analysis: {
+            analyzer: {
+              default: {
+                type: 'standard'
+              }
             }
           }
+        },
+        mappings: {
+          properties: {
+            messageId: { type: 'keyword' },
+            subject: { type: 'text' },
+            from: { type: 'text' },
+            to: { type: 'text' },
+            date: { type: 'date' },
+            body: { type: 'text' },
+            account: { type: 'keyword' }
+          }
         }
-      },
-      mappings: {
-        properties: {
-          messageId: { type: 'keyword' },
-          subject: { type: 'text' },
-          from: { type: 'text' },
-          to: { type: 'text' },
-          date: { type: 'date' },
-          body: { type: 'text' },
-          account: { type: 'keyword' }
-        }
-      }
-    });
-    console.log('✅ emails index created');
-  } else {
-    console.log('🟢 Elasticsearch index "emails" already exists');
+      });
+      console.log('✅ emails index created');
+    } else {
+      console.log('🟢 Elasticsearch index "emails" already exists');
+    }
+  } catch (error) {
+    console.log('⚠️ Elasticsearch not available, running without search functionality');
+    console.log('To enable search, start Elasticsearch with: docker-compose up elasticsearch -d');
   }
 }
 
-ensureElasticsearchIndex().catch(console.error);
+ensureElasticsearchIndex().catch(() => {
+  console.log('⚠️ Elasticsearch connection failed, continuing without search functionality');
+});
 
 async function fetchUserEmail(accessToken) {
   const { OAuth2 } = google.auth;
