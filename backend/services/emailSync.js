@@ -55,20 +55,30 @@ async function storeEmail(parsed, accountEmail) {
     await emailDoc.save();
     console.log('✅ Email saved to MongoDB:', parsed.subject);
 
-    await esClient.index({
-      index: 'emails',
-      id: parsed.messageId,
-      document: {
-        messageId: parsed.messageId,
-        subject: parsed.subject || '(no subject)',
-        from: parsed.from?.text || '',
-        to: parsed.to?.text || '',
-        date: parsed.date || new Date(),
-        body: parsed.text || '',
-        account: account._id.toString(),
-        label
+    // Index in Elasticsearch if available
+    if (esClient) {
+      try {
+        await esClient.index({
+          index: 'emails',
+          id: parsed.messageId,
+          document: {
+            messageId: parsed.messageId,
+            subject: parsed.subject || '(no subject)',
+            from: parsed.from?.text || '',
+            to: parsed.to?.text || '',
+            date: parsed.date || new Date(),
+            body: parsed.text || '',
+            account: account._id.toString(),
+            label
+          }
+        });
+        console.log('✅ Email indexed in Elasticsearch');
+      } catch (esError) {
+        console.warn('Failed to index email in Elasticsearch:', esError.message);
       }
-    });
+    } else {
+      console.log('⚠️ Elasticsearch not available, skipping indexing');
+    }
     console.log('🔍 Indexed to Elasticsearch:', parsed.subject);
 
     // 🚀 Step 4: Slack & Webhook Integration

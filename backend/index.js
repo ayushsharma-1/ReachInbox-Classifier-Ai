@@ -1,4 +1,5 @@
 const express = require('express');
+const cors = require('cors');
 const mongoose = require('mongoose');
 const { getAuthUrl, getTokens } = require('./auth/gmail');
 const { connectToImap } = require('./imap/gmailClient');
@@ -18,13 +19,19 @@ const PORT = 3000;
 
 mongoose.connect(process.env.MONGODB_URI);
 
+// CORS configuration
+app.use(cors({
+  origin: ['http://localhost:5000', 'http://localhost:3000'],
+  credentials: true
+}));
+
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+
 app.get('/auth/gmail/initiate', (req, res) => {
   const url = getAuthUrl();
   res.redirect(url);
 });
-
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
 
 // Search emails route
 app.get('/api/emails/search', async (req, res) => {
@@ -42,17 +49,30 @@ app.get('/api/emails', async (req, res) => {
   try {
     const { accountId, folder, limit = 50, offset = 0, label } = req.query;
     
-    // Use Elasticsearch for all filtering
-    const results = await searchEmails({ 
-      query: '', // empty query to get all
-      folder, 
-      accountId, 
-      label,
-      size: parseInt(limit),
-      from: parseInt(offset)
-    });
+    const filter = {};
+    if (accountId) filter.account = accountId;
+    if (folder) filter.folder = folder;
+    if (label) filter.label = label;
     
-    res.json({ success: true, emails: results, count: results.length });
+    const emails = await Email.find(filter)
+      .sort({ date: -1 })
+      .limit(parseInt(limit))
+      .skip(parseInt(offset))
+      .populate('account', 'email');
+    
+    const total = await Email.countDocuments(filter);
+    
+    res.json({ 
+      success: true, 
+      emails, 
+      count: emails.length,
+      total,
+      pagination: {
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        hasMore: (parseInt(offset) + emails.length) < total
+      }
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -116,14 +136,30 @@ app.post('/api/webhook/test', async (req, res) => {
 // Get emails filtered by 'Interested' label
 app.get('/api/emails/interested', async (req, res) => {
   try {
-    const results = await searchEmails({ 
-      query: '',
-      label: 'Interested',
-      size: 50,
-      from: 0
-    });
+    const { accountId, limit = 50, offset = 0 } = req.query;
     
-    res.json({ success: true, emails: results, count: results.length });
+    const filter = { label: 'Interested' };
+    if (accountId) filter.account = accountId;
+    
+    const emails = await Email.find(filter)
+      .sort({ date: -1 })
+      .limit(parseInt(limit))
+      .skip(parseInt(offset))
+      .populate('account', 'email');
+    
+    const total = await Email.countDocuments(filter);
+    
+    res.json({ 
+      success: true, 
+      emails, 
+      count: emails.length,
+      total,
+      pagination: {
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        hasMore: (parseInt(offset) + emails.length) < total
+      }
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -363,6 +399,115 @@ async function fetchUserEmail(accessToken) {
   const res = await oauth2.userinfo.get();
   return res.data;
 }
+
+// 📊 Stats endpoint for dashboard
+app.get('/api/stats', async (req, res) => {
+  try {
+    const { accountId } = req.query;
+    
+    // Get total email count
+    const totalEmails = await Email.countDocuments(accountId ? { account: accountId } : {});
+    
+    // Get interested emails count
+    const interestedEmails = await Email.countDocuments(
+      accountId 
+        ? { account: accountId, label: 'Interested' }
+        : { label: 'Interested' }
+    );
+    
+    // Get not interested emails count
+    const notInterestedEmails = await Email.countDocuments(
+      accountId 
+        ? { account: accountId, label: 'Not Interested' }
+        : { label: 'Not Interested' }
+    );
+    
+    // Get drafts count
+    const draftsCount = await EmailDraft.countDocuments(
+      accountId ? { account: accountId } : {}
+    );
+    
+    res.json({
+      success: true,
+      stats: {
+        totalEmails,
+        interestedEmails,
+        notInterestedEmails,
+        drafts: draftsCount,
+        classifiedEmails: interestedEmails + notInterestedEmails,
+        unclassifiedEmails: totalEmails - (interestedEmails + notInterestedEmails)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 📝 Get not interested emails
+app.get('/api/emails/not-interested', async (req, res) => {
+  try {
+    const { accountId, limit = 50, offset = 0 } = req.query;
+    
+    const filter = { label: 'Not Interested' };
+    if (accountId) filter.account = accountId;
+    
+    const emails = await Email.find(filter)
+      .sort({ date: -1 })
+      .limit(parseInt(limit))
+      .skip(parseInt(offset))
+      .populate('account', 'email');
+    
+    const total = await Email.countDocuments(filter);
+    
+    res.json({ 
+      success: true, 
+      emails, 
+      count: emails.length,
+      total,
+      pagination: {
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        hasMore: (parseInt(offset) + emails.length) < total
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 📂 Get emails by classification
+app.get('/api/emails/by-label/:label', async (req, res) => {
+  try {
+    const { label } = req.params;
+    const { accountId, limit = 50, offset = 0 } = req.query;
+    
+    const filter = { label: label };
+    if (accountId) filter.account = accountId;
+    
+    const emails = await Email.find(filter)
+      .sort({ date: -1 })
+      .limit(parseInt(limit))
+      .skip(parseInt(offset))
+      .populate('account', 'email');
+    
+    const total = await Email.countDocuments(filter);
+    
+    res.json({ 
+      success: true, 
+      emails, 
+      count: emails.length,
+      total,
+      label,
+      pagination: {
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        hasMore: (parseInt(offset) + emails.length) < total
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
 
